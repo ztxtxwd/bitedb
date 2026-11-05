@@ -1,6 +1,6 @@
 {
   "name": "bitedb",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A headless, zero-provisioning serverless NoSQL database engine built on Feishu/Lark Bitable",
   "license": "MIT",
   "repository": {
