@@ -257,9 +257,12 @@ export async function decodeFieldValue(
     }
 
     case 'json': {
-      if (typeof raw !== 'string') return raw
+      // JSON values are stored as text, so the search endpoint returns them in
+      // the same `[{ text, type }]` shape as any other text column.
+      const text = decodeTextValue(raw)
+      if (text === undefined) return raw
       try {
-        return JSON.parse(raw)
+        return JSON.parse(text)
       } catch {
         return raw
       }
@@ -343,13 +346,15 @@ function decodeComputed(field: StoredField, raw: unknown): unknown {
     case 'text':
       if (Array.isArray(raw)) return raw.map((item) => item?.text ?? item).join('')
       return typeof raw === 'string' ? raw : String(raw)
-    case 'json':
-      if (typeof raw !== 'string') return raw
+    case 'json': {
+      const text = decodeTextValue(raw)
+      if (text === undefined) return raw
       try {
-        return JSON.parse(raw)
+        return JSON.parse(text)
       } catch {
         return raw
       }
+    }
     default:
       if (isSpillMarkerString(raw)) return raw
       return raw

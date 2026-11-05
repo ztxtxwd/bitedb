@@ -100,11 +100,32 @@ export type SortSpec =
 export type Filter = Record<string, unknown>
 
 export interface QueryOptions {
+  /**
+   * Maximum number of rows to return. Defaults to **100**, and rows beyond the
+   * limit are silently dropped. Pass an explicit limit (or use
+   * `Query.page()` / `Table.findAfter()`) when the result set may be larger.
+   */
   limit?: number
+  /**
+   * Rows to skip. Offsets are applied after fetching: every shard is searched
+   * for up to `offset + limit` rows before the final slice, so deep offsets get
+   * progressively more expensive. Prefer cursor pagination with
+   * `Table.findAfter()` for large result sets.
+   */
   offset?: number
   sort?: SortSpec
   /** Restrict returned fields. `_id` is always returned. */
   fields?: string[]
+}
+
+/** Options accepted by `updateOne` / `updateById` / `updateMany`. */
+export interface UpdateOptions {
+  /**
+   * Materialise the document around the update. `'before'` returns the matched
+   * row as it was before the write, `'after'` returns it after the write. Omit
+   * to skip document materialisation (the default, and the fastest option).
+   */
+  returnDocument?: 'before' | 'after'
 }
 
 /** How attachment payloads are materialised when reading. */
@@ -174,9 +195,20 @@ export interface BiteDBConfig {
   fetch?: typeof fetch
 }
 
-export interface UpdateResult {
+export interface UpdateResult<T extends Document = Document> {
   matchedCount: number
+  /** Rows whose fields actually changed. */
   modifiedCount: number
+  /**
+   * The updated document when `returnDocument` was requested on
+   * `updateOne` / `updateById`.
+   */
+  document?: WithId<T>
+  /**
+   * One entry per matched row when `returnDocument` was requested on
+   * `updateMany`, in the order the rows were matched.
+   */
+  documents?: Array<WithId<T>>
 }
 
 export interface DeleteResult {

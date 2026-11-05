@@ -258,6 +258,16 @@ export function compareDocuments(a: Document, b: Document, sort: SortSpec): numb
   return 0
 }
 
+export function sortDirectionFor(
+  sort: SortSpec | undefined,
+  field: string,
+): SortDirection | undefined {
+  for (const [key, direction] of sortEntries(sort)) {
+    if (key === field) return direction
+  }
+  return undefined
+}
+
 function sortEntries(sort: SortSpec | undefined): Array<[string, SortDirection]> {
   if (!sort) return []
   if (typeof sort === 'string') return [[sort, 'asc']]
