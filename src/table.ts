@@ -243,6 +243,7 @@ export class Table<T extends Document = Document> {
       baseToken: this.token!,
       hydrate: hydrate ?? this.database.config.hydrate,
       links: this.linkResolver,
+      logger: this.database.logger,
     }
   }
 

@@ -66,6 +66,68 @@ test('zero provisioning: creates catalog, database and physical table', async ()
   assert.match(formulaCalls[0]!.body.property.formula_expression, /\$field\[fld/)
 })
 
+test('find/findOne return the same logical _id as insertOne and get', async () => {
+  const client = makeClient()
+  const cards = client.useDatabase('logical_ids').defineTable('cards', {
+    owner: 'text',
+    title: 'text',
+  })
+  const inserted = await cards.insertOne({ owner: 'ada', title: 'first' })
+
+  const found = await cards.findOne({ title: 'first' })
+  assert.ok(found)
+  assert.equal(found._id, inserted._id)
+  assert.equal(found.owner, 'ada')
+
+  const rows = await cards.find({ owner: 'ada' }).toArray()
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!._id, inserted._id)
+
+  const got = await cards.get(inserted._id)
+  assert.ok(got)
+  assert.equal(got._id, inserted._id)
+})
+
+test('an unreadable _id falls back to the record id and logs a warning', async () => {
+  const warnings: string[] = []
+  const client = makeClient({
+    logger: { warn: (...args: any[]) => warnings.push(args.map(String).join(' ')) },
+  })
+  const table = client.useDatabase('bad_ids').defineTable('items', { name: 'text' })
+  const inserted = await table.insertOne({ name: 'x' })
+
+  const base = [...fake.bases.values()].find((entry) => entry.name === 'bitedb:bad_ids')!
+  const physical = [...base.tables.values()].find((entry) => entry.name === 'items')!
+  const record = [...physical.records.values()].find((entry) => entry.fields._id === inserted._id)!
+  record.fields._id = { unexpected: true }
+
+  const found = await table.findOne({ name: 'x' })
+  assert.ok(found)
+  assert.equal(found._id, record.record_id)
+  assert.ok(warnings.some((message) => message.includes('unsupported _id')))
+})
+
+test('database.prewarm provisions every declared table', async () => {
+  const client = makeClient()
+  const database = client.useDatabase('prewarm')
+  const users = database.defineTable('users', { name: 'text' })
+  const posts = database.defineTable('posts', {
+    title: 'text',
+    author: { type: 'link', table: 'users' },
+  })
+  database.defineTable('audit', { action: 'text' })
+
+  await database.prewarm()
+
+  const names = (await database.listTables()).map((table) => table.name).sort()
+  assert.deepEqual(names, ['audit', 'posts', 'users'])
+
+  const user = await users.insertOne({ name: 'Ada' })
+  const post = await posts.insertOne({ title: 'Hello', author: user._id })
+  assert.equal((await posts.get(post._id))!.title, 'Hello')
+  assert.deepEqual((await posts.find({ author: user._id }).toArray())[0]!._id, post._id)
+})
+
 test('reconnects from catalog discovery and reads existing data', async () => {
   const client = makeClient()
   const orders = client.useDatabase('zero_provision').table('orders')

@@ -160,11 +160,14 @@ const db = createClient({
 })
 
 const database = db.useDatabase('production')  // 懒加载
-await database.ensure()                        // 可显式预热
+await database.ensure()                        // 只创建 / 发现 Base
 
 const table = database.defineTable('orders', schema)
 const same = database.table('orders')          // 同一句柄
 const alias = database.collection('orders')    // 别名
+
+// 已声明的表会在首次读写时逐个创建；需要提前预热时，并行创建它们
+await database.prewarm()
 
 await db.listDatabases()
 const catalogToken = await db.catalogBaseToken()
@@ -437,6 +440,7 @@ __bitedb_catalog__          <- 系统 Base
 - **目录发现**：客户端启动时先按名称找到目录 Base；找不到就创建。`databasePrefix` 是恢复时匹配数据库 Base 的依据，请保持稳定。
 - **固定目录**：多进程/Serverless 环境建议固定 `catalogBaseToken`，或设置环境变量 `BITEDB_CATALOG_BASE_TOKEN`，避免并发首次启动时创建多个目录。
 - **目录丢失恢复**：如果目录记录丢失，bitedb 会按 `bitedb:<name>` 收养已有数据库 Base，并按物理表名（含 `#N`）收养已有分片；同时从 Bitable 重新读取字段与真实行数。数据不会因为目录丢失而重建。
+- **冷启动**：表与字段默认在首次读写时按需创建。提前 `defineTable()` 后调用 `database.prewarm()` 会并行初始化所有已注册的表句柄；关联/公式字段仍按依赖顺序创建。字段级 DDL 不并行，以免同一张表上的并发建字段互相冲突。
 - **默认表**：飞书创建 Base 时会自带一张默认表，bitedb 不依赖、也不会自动删除它。
 
 ---
@@ -492,6 +496,7 @@ class Database {
   dropTable(name): Promise<void>
   refresh(): Promise<void>
   ensure(): Promise<DatabaseMeta>
+  prewarm(): Promise<void>
 }
 
 class Table<T> {
