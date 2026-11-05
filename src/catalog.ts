@@ -54,7 +54,10 @@ export class Catalog {
 
   private readonly databaseIndex = new Map<string, DatabaseMeta>()
   private readonly tableCache = new Map<string, TableMeta>()
-  private readonly pendingSaves = new Map<string, TableMeta>()
+  private readonly pendingSaves = new Map<string, { meta: TableMeta; epoch: number }>()
+  // Bumped whenever a table is deleted, so an in-flight coalesced flush that
+  // snapshotted pre-delete metadata cannot resurrect the catalog record.
+  private readonly tableEpochs = new Map<string, number>()
   private flushTimer?: ReturnType<typeof setTimeout>
   private flushPromise?: Promise<void>
 
@@ -376,11 +379,15 @@ export class Catalog {
     })
   }
 
+  private epochOf(key: string): number {
+    return this.tableEpochs.get(key) ?? 0
+  }
+
   /** Coalesced row-count persistence. */
   scheduleTableSave(meta: TableMeta): void {
     const key = `${meta.database}\u0001${meta.name}`
     // Keep the live object so recordId assignments are visible at flush time.
-    this.pendingSaves.set(key, meta)
+    this.pendingSaves.set(key, { meta, epoch: this.epochOf(key) })
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
         this.flushTimer = undefined
@@ -401,14 +408,21 @@ export class Catalog {
     }
     if (this.pendingSaves.size === 0) return
 
-    const snapshots = [...this.pendingSaves.values()].map(cloneMeta)
+    const snapshots = [...this.pendingSaves.entries()].map(([key, entry]) => ({
+      key,
+      epoch: entry.epoch,
+      meta: cloneMeta(entry.meta),
+    }))
     this.pendingSaves.clear()
     this.flushPromise = this.writeMutex
       .runExclusive(async () => {
-        for (const meta of snapshots) {
+        for (const { key, epoch, meta } of snapshots) {
+          // The table was deleted after this snapshot was taken; persisting it
+          // would recreate the catalog row for a physical table that is gone.
+          if (this.epochOf(key) !== epoch) continue
           try {
             const saved = await this.persistTable(meta)
-            this.tableCache.set(`${meta.database}\u0001${meta.name}`, saved)
+            this.tableCache.set(key, saved)
           } catch (err) {
             this.logger.warn?.('[bitedb] failed to persist table metadata:', err)
           }
@@ -453,10 +467,15 @@ export class Catalog {
     await this.init()
     const key = `${database}\u0001${table}`
     const cached = this.tableCache.get(key) ?? (await this.findTableInCatalog(database, table))
-    this.tableCache.delete(key)
     this.pendingSaves.delete(key)
-    if (!cached?.recordId || !this.systemTables || !this.baseToken) return
-    await this.client.deleteRecord(this.baseToken, this.systemTables.tables, cached.recordId)
+    await this.writeMutex.runExclusive(async () => {
+      // Serialize with metadata flushes and invalidate any snapshot that was
+      // taken before this point.
+      this.tableEpochs.set(key, this.epochOf(key) + 1)
+      this.tableCache.delete(key)
+      if (!cached?.recordId || !this.systemTables || !this.baseToken) return
+      await this.client.deleteRecord(this.baseToken, this.systemTables.tables, cached.recordId)
+    })
   }
 
   invalidateDatabase(name: string): void {
