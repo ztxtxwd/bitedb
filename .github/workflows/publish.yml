@@ -76,9 +76,9 @@ jobs:
           fi
 
       - name: Publish (dry run)
-        if: steps.exists.outputs.published == 'false' && inputs.dry-run
+        if: steps.exists.outputs.published == 'false' && inputs['dry-run']
         run: npm publish --dry-run --access public
 
       - name: Publish
-        if: steps.exists.outputs.published == 'false' && !inputs.dry-run
+        if: steps.exists.outputs.published == 'false' && !inputs['dry-run']
         run: npm publish --provenance --access public
