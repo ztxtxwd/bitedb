@@ -34,6 +34,7 @@ import type {
   QueryOptions,
   SchemaDefinition,
   TableStats,
+  UpdateOptions,
   UpdateResult,
   UpdateSpec,
   WithId,
@@ -243,6 +244,7 @@ export class Table<T extends Document = Document> {
       baseToken: this.token!,
       hydrate: hydrate ?? this.database.config.hydrate,
       links: this.linkResolver,
+      logger: this.database.logger,
     }
   }
 
@@ -981,6 +983,16 @@ export class Table<T extends Document = Document> {
     return new Query<T>(this, filter, options)
   }
 
+  /**
+   * Cursor pagination helper. Shorthand for
+   * `find({}, options).after(field, lastValue)`; use `Query.after()` directly
+   * to combine a cursor with a filter. The cursor field should be unique
+   * (`_id` is a good choice); rows sharing a cursor value may be skipped.
+   */
+  findAfter(field: string, lastValue: unknown, options: QueryOptions = {}): Query<T> {
+    return this.find({}, options).after(field, lastValue)
+  }
+
   async findOne(filter: Filter = {}, options: QueryOptions = {}): Promise<WithId<T> | null> {
     const docs = await this.executeFind(filter, { ...options, limit: 1, offset: 0 })
     return (docs[0] as WithId<T> | undefined) ?? null
@@ -1044,15 +1056,26 @@ export class Table<T extends Document = Document> {
 
   /** @internal used by Query */
   async executeFind(filter: Filter = {}, options: QueryOptions = {}): Promise<Document[]> {
+    return (await this.executeFindPage(filter, options)).documents
+  }
+
+  /** @internal used by Query.page() */
+  async executeFindPage(
+    filter: Filter = {},
+    options: QueryOptions = {},
+  ): Promise<{ documents: Document[]; hasMore: boolean }> {
     const meta = await this.ensure()
     const compiled = compileFilter(await this.translateFilter(filter, meta), meta)
-    if (compiled.impossible) return []
+    if (compiled.impossible) return { documents: [], hasMore: false }
     const { limit, offset } = normalizeQueryOptions(options)
-    if (limit === 0) return []
+    if (limit === 0) return { documents: [], hasMore: false }
     const sort = parseSort(options.sort, meta)
     const sortSpec = options.sort
     const fieldNames = mapFieldNames(options.fields, meta)
     const need = offset + limit
+    // Read one extra row beyond the page. This is enough to tell whether more
+    // results exist without a separate count query.
+    const probe = need + 1
 
     const perShard = await Promise.all(
       meta.shards.map((shard) =>
@@ -1066,7 +1089,7 @@ export class Table<T extends Document = Document> {
               ...(fieldNames ? { field_names: fieldNames } : {}),
               automatic_fields: false,
             },
-            { maxRecords: need },
+            { maxRecords: probe },
           )
           const docs: Document[] = []
           for (const item of items) {
@@ -1088,28 +1111,41 @@ export class Table<T extends Document = Document> {
       ),
     )
 
+    let merged: Document[]
     if (sort.length > 0) {
-      const merged = mergeSorted(
+      merged = mergeSorted(
         perShard.map((entry) => entry.docs),
         (a, b) => compareDocuments(a, b, sortSpec!),
-        need,
+        probe,
       )
-      return merged.slice(offset, offset + limit)
+    } else {
+      perShard.sort((a, b) => a.index - b.index)
+      merged = perShard.flatMap((entry) => entry.docs)
     }
 
-    perShard.sort((a, b) => a.index - b.index)
-    const merged = perShard.flatMap((entry) => entry.docs)
-    return merged.slice(offset, offset + limit)
+    const hasMore = merged.length > need
+    if (hasMore && options.limit === undefined) {
+      this.database.logger.debug(
+        `[bitedb] query on "${this.name}" hit the default limit of ${limit} rows; ` +
+          'results were truncated. Pass limit() explicitly or use page() to detect more rows.',
+      )
+    }
+    return { documents: merged.slice(offset, offset + limit), hasMore }
   }
 
   // ---------------------------------------------------------------------------
   // Update
   // ---------------------------------------------------------------------------
 
-  async updateOne(target: string | Filter, update: UpdateSpec<T>): Promise<UpdateResult> {
+  async updateOne(
+    target: string | Filter,
+    update: UpdateSpec<T>,
+    options: UpdateOptions = {},
+  ): Promise<UpdateResult<T>> {
     if (typeof target === 'string' && target.length === 0) {
       throw new ValidationError('updateOne id must be a non-empty string')
     }
+    const returnDocument = normalizeReturnDocument(options)
     const meta = await this.ensure()
     const located =
       typeof target === 'string'
@@ -1117,21 +1153,47 @@ export class Table<T extends Document = Document> {
         : await this.locateFirst(target, meta)
     if (!located) return { matchedCount: 0, modifiedCount: 0 }
     const patch = await this.buildPatch(meta, update, located.fields)
-    if (Object.keys(patch).length === 0) return { matchedCount: 1, modifiedCount: 0 }
+    if (Object.keys(patch).length === 0) {
+      const result: UpdateResult<T> = { matchedCount: 1, modifiedCount: 0 }
+      if (returnDocument) {
+        result.document = (await this.decodeStoredRecord(meta, located, located.fields)) as WithId<T>
+      }
+      return result
+    }
     await this.database.client.updateRecord(
       this.token!,
       located.shardTableId,
       located.recordId,
       patch,
     )
-    return { matchedCount: 1, modifiedCount: 1 }
+    const result: UpdateResult<T> = { matchedCount: 1, modifiedCount: 1 }
+    if (returnDocument === 'before') {
+      result.document = (await this.decodeStoredRecord(meta, located, located.fields)) as WithId<T>
+    } else if (returnDocument === 'after') {
+      result.document = (await this.decodePatchedRecord(
+        meta,
+        located,
+        located.fields,
+        patch,
+      )) as WithId<T>
+    }
+    return result
   }
 
-  async updateById(id: string, update: UpdateSpec<T>): Promise<UpdateResult> {
-    return this.updateOne(id, update)
+  async updateById(
+    id: string,
+    update: UpdateSpec<T>,
+    options: UpdateOptions = {},
+  ): Promise<UpdateResult<T>> {
+    return this.updateOne(id, update, options)
   }
 
-  async updateMany(filter: Filter, update: UpdateSpec<T>): Promise<UpdateResult> {
+  async updateMany(
+    filter: Filter,
+    update: UpdateSpec<T>,
+    options: UpdateOptions = {},
+  ): Promise<UpdateResult<T>> {
+    const returnDocument = normalizeReturnDocument(options)
     const meta = await this.ensure()
     const compiled = compileFilter(await this.translateFilter(filter, meta), meta)
     if (compiled.impossible) return { matchedCount: 0, modifiedCount: 0 }
@@ -1140,6 +1202,7 @@ export class Table<T extends Document = Document> {
       : await this.buildPatch(meta, update, {})
     let matchedCount = 0
     let modifiedCount = 0
+    const documents: Array<WithId<Document>> = []
 
     for (const shard of meta.shards) {
       const { items } = await this.database.client.searchAllRecords(this.token!, shard.tableId, {
@@ -1148,19 +1211,76 @@ export class Table<T extends Document = Document> {
       })
       if (items.length === 0) continue
       const updates: Array<{ record_id: string; fields: Record<string, any> }> = []
+      const patches = new Map<string, Record<string, any>>()
       for (const item of items) {
         matchedCount++
         const patch = staticPatch ?? (await this.buildPatch(meta, update, item.fields))
         if (Object.keys(patch).length === 0) continue
         updates.push({ record_id: item.record_id, fields: patch })
+        patches.set(item.record_id, patch)
       }
       for (const chunk of chunkArray(updates, this.database.config.maxBatchSize)) {
         if (chunk.length === 0) continue
         await this.database.client.batchUpdateRecords(this.token!, shard.tableId, chunk)
         modifiedCount += chunk.length
       }
+      if (returnDocument) {
+        for (const item of items) {
+          const location = { shardIndex: shard.index, recordId: item.record_id }
+          const patch = patches.get(item.record_id)
+          documents.push(
+            returnDocument === 'after' && patch
+              ? await this.decodePatchedRecord(meta, location, item.fields, patch)
+              : await this.decodeStoredRecord(meta, location, item.fields),
+          )
+        }
+      }
     }
-    return { matchedCount, modifiedCount }
+    const result: UpdateResult<T> = { matchedCount, modifiedCount }
+    if (returnDocument) result.documents = documents as Array<WithId<T>>
+    return result
+  }
+
+  private async decodeStoredRecord(
+    meta: TableMeta,
+    location: RecordLocation,
+    fields: Record<string, any>,
+  ): Promise<WithId<Document>> {
+    const doc = await decodeRecord(fields, meta, this.codecContext(), location.recordId)
+    this.rememberLocation({
+      shardIndex: location.shardIndex,
+      recordId: location.recordId,
+      logicalId: typeof doc._id === 'string' ? doc._id : undefined,
+    })
+    return doc as WithId<Document>
+  }
+
+  /**
+   * Build the post-update document locally from the pre-update row and the
+   * encoded patch, mirroring what a fresh `get()` would return without an
+   * extra read. Server-computed formula values are whatever the row held
+   * before the write; Feishu recalculates them asynchronously.
+   */
+  private async decodePatchedRecord(
+    meta: TableMeta,
+    location: RecordLocation,
+    beforeFields: Record<string, any>,
+    patch: Record<string, any>,
+  ): Promise<WithId<Document>> {
+    const doc = await decodeRecord(beforeFields, meta, this.codecContext(), location.recordId)
+    for (const [name, raw] of Object.entries(patch)) {
+      const field = meta.fields.find((item) => item.name === name)
+      if (!field) continue
+      const value = await decodeFieldValue(field, raw, this.codecContext())
+      if (value === undefined) delete doc[field.key]
+      else setOwn(doc, field.key, value)
+    }
+    this.rememberLocation({
+      shardIndex: location.shardIndex,
+      recordId: location.recordId,
+      logicalId: typeof doc._id === 'string' ? doc._id : undefined,
+    })
+    return doc as WithId<Document>
   }
 
   private async buildPatch(
@@ -1823,6 +1943,13 @@ function chunkArray<T>(items: T[], size: number): T[][] {
 function hasRuntimeUpdateOperators(update: UpdateSpec<any>): boolean {
   if (!update || typeof update !== 'object') return false
   return Object.prototype.hasOwnProperty.call(update, '$inc') || Object.prototype.hasOwnProperty.call(update, '$push')
+}
+
+function normalizeReturnDocument(options: UpdateOptions | undefined): 'before' | 'after' | undefined {
+  const value = options?.returnDocument
+  if (value === undefined) return undefined
+  if (value === 'before' || value === 'after') return value
+  throw new ValidationError('returnDocument must be "before" or "after"')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

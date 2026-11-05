@@ -59,6 +59,16 @@ export class Database {
     return this.ensurePromise
   }
 
+  /**
+   * Eagerly ensure this Base and every table handle registered on it. Tables
+   * are provisioned concurrently, which shortens cold starts where several
+   * independent tables would otherwise be created one after another.
+   */
+  async prewarm(): Promise<void> {
+    await this.ensure()
+    await Promise.all(this.tableHandles().map((table) => table.ensure()))
+  }
+
   async getToken(): Promise<string> {
     return (await this.ensure()).appToken
   }

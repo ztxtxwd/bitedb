@@ -66,6 +66,68 @@ test('zero provisioning: creates catalog, database and physical table', async ()
   assert.match(formulaCalls[0]!.body.property.formula_expression, /\$field\[fld/)
 })
 
+test('find/findOne return the same logical _id as insertOne and get', async () => {
+  const client = makeClient()
+  const cards = client.useDatabase('logical_ids').defineTable('cards', {
+    owner: 'text',
+    title: 'text',
+  })
+  const inserted = await cards.insertOne({ owner: 'ada', title: 'first' })
+
+  const found = await cards.findOne({ title: 'first' })
+  assert.ok(found)
+  assert.equal(found._id, inserted._id)
+  assert.equal(found.owner, 'ada')
+
+  const rows = await cards.find({ owner: 'ada' }).toArray()
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!._id, inserted._id)
+
+  const got = await cards.get(inserted._id)
+  assert.ok(got)
+  assert.equal(got._id, inserted._id)
+})
+
+test('an unreadable _id falls back to the record id and logs a warning', async () => {
+  const warnings: string[] = []
+  const client = makeClient({
+    logger: { warn: (...args: any[]) => warnings.push(args.map(String).join(' ')) },
+  })
+  const table = client.useDatabase('bad_ids').defineTable('items', { name: 'text' })
+  const inserted = await table.insertOne({ name: 'x' })
+
+  const base = [...fake.bases.values()].find((entry) => entry.name === 'bitedb:bad_ids')!
+  const physical = [...base.tables.values()].find((entry) => entry.name === 'items')!
+  const record = [...physical.records.values()].find((entry) => entry.fields._id === inserted._id)!
+  record.fields._id = { unexpected: true }
+
+  const found = await table.findOne({ name: 'x' })
+  assert.ok(found)
+  assert.equal(found._id, record.record_id)
+  assert.ok(warnings.some((message) => message.includes('unsupported _id')))
+})
+
+test('database.prewarm provisions every declared table', async () => {
+  const client = makeClient()
+  const database = client.useDatabase('prewarm')
+  const users = database.defineTable('users', { name: 'text' })
+  const posts = database.defineTable('posts', {
+    title: 'text',
+    author: { type: 'link', table: 'users' },
+  })
+  database.defineTable('audit', { action: 'text' })
+
+  await database.prewarm()
+
+  const names = (await database.listTables()).map((table) => table.name).sort()
+  assert.deepEqual(names, ['audit', 'posts', 'users'])
+
+  const user = await users.insertOne({ name: 'Ada' })
+  const post = await posts.insertOne({ title: 'Hello', author: user._id })
+  assert.equal((await posts.get(post._id))!.title, 'Hello')
+  assert.deepEqual((await posts.find({ author: user._id }).toArray())[0]!._id, post._id)
+})
+
 test('reconnects from catalog discovery and reads existing data', async () => {
   const client = makeClient()
   const orders = client.useDatabase('zero_provision').table('orders')
@@ -452,4 +514,185 @@ test('chunked upload path stores media larger than 20 MB', async () => {
   assert.equal(restored.length, payload.length)
   const hash = (buffer: Buffer) => createHash('sha256').update(buffer).digest('hex')
   assert.equal(hash(restored), hash(payload))
+})
+
+test('json columns decode segment arrays from the search endpoint', async () => {
+  const client = makeClient()
+  const cards = client.useDatabase('json_segments').defineTable('cards', {
+    owner: 'text',
+    dsl: { type: 'json' },
+  })
+  const dsl = {
+    schema: '2.0',
+    body: { elements: [{ tag: 'markdown', content: 'hi' }] },
+  }
+  const inserted = await cards.insertOne({ owner: 'u1', dsl })
+
+  const found = await cards.findOne({ owner: 'u1' })
+  assert.ok(found)
+  assert.deepEqual(found.dsl, dsl)
+  assert.ok(!Array.isArray(found.dsl))
+
+  const rows = await cards.find({ owner: 'u1' }).toArray()
+  assert.deepEqual(rows[0]!.dsl, dsl)
+
+  const got = await cards.get(inserted._id)
+  assert.deepEqual(got!.dsl, dsl)
+
+  // A JSON value that is itself an array must not be confused with the
+  // rich-text segment array returned for text columns.
+  await cards.insertOne({ owner: 'u2', dsl: [1, 2, { a: true }] })
+  const list = await cards.findOne({ owner: 'u2' })
+  assert.deepEqual(list!.dsl, [1, 2, { a: true }])
+})
+
+test('updateOne / updateById can return the document before or after the write', async () => {
+  const client = makeClient()
+  const table = client.useDatabase('update_return').defineTable('items', {
+    name: 'text',
+    qty: 'number',
+    meta: { type: 'json' },
+  })
+  const inserted = await table.insertOne({ name: 'a', qty: 1, meta: { tags: ['x'] } })
+
+  const plain = await table.updateOne(inserted._id, { $inc: { qty: 2 } })
+  assert.deepEqual(plain, { matchedCount: 1, modifiedCount: 1 })
+
+  const before = await table.updateById(
+    inserted._id,
+    { $set: { name: 'b' } },
+    { returnDocument: 'before' },
+  )
+  assert.equal(before.document!._id, inserted._id)
+  assert.equal(before.document!.name, 'a')
+
+  const after = await table.updateOne(
+    inserted._id,
+    { $set: { name: 'c' }, $inc: { qty: 3 } },
+    { returnDocument: 'after' },
+  )
+  assert.equal(after.document!.name, 'c')
+  assert.equal(after.document!.qty, 6)
+  assert.deepEqual(after.document!.meta, { tags: ['x'] })
+
+  // An empty patch matches the row without writing it; the document is still
+  // available.
+  const noop = await table.updateById(inserted._id, {}, { returnDocument: 'after' })
+  assert.equal(noop.matchedCount, 1)
+  assert.equal(noop.modifiedCount, 0)
+  assert.equal(noop.document!.name, 'c')
+
+  await assert.rejects(
+    table.updateOne(inserted._id, { $set: { name: 'd' } }, { returnDocument: 'yes' as any }),
+    /returnDocument/,
+  )
+})
+
+test('updateMany can return the matched documents across shards', async () => {
+  const client = makeClient({ maxRowsPerShard: 2 })
+  const table = client.useDatabase('update_many_return').defineTable('items', {
+    name: 'text',
+    qty: 'number',
+  })
+  const docs = await table.insertMany([
+    { name: 'a', qty: 1 },
+    { name: 'b', qty: 2 },
+    { name: 'c', qty: 3 },
+  ])
+  assert.equal((await table.stats()).shards.length, 2)
+
+  const after = await table.updateMany(
+    { qty: { $gte: 2 } },
+    { $inc: { qty: 10 } },
+    { returnDocument: 'after' },
+  )
+  assert.equal(after.matchedCount, 2)
+  assert.equal(after.modifiedCount, 2)
+  assert.deepEqual(
+    after.documents!.map((doc) => [doc.name, doc.qty]).sort(),
+    [
+      ['b', 12],
+      ['c', 13],
+    ],
+  )
+
+  const before = await table.updateMany(
+    { name: 'a' },
+    { $set: { qty: 100 } },
+    { returnDocument: 'before' },
+  )
+  assert.equal(before.documents!.length, 1)
+  assert.equal(before.documents![0]!._id, docs[0]!._id)
+  assert.equal(before.documents![0]!.qty, 1)
+})
+
+test('Query.page reports truncation and findAfter pages by cursor', async () => {
+  const client = makeClient({ maxRowsPerShard: 2 })
+  const table = client.useDatabase('paging').defineTable('events', {
+    seq: 'number',
+    kind: 'text',
+  })
+  await table.insertMany(
+    Array.from({ length: 5 }, (_, index) => ({
+      seq: index + 1,
+      kind: index % 2 === 0 ? 'odd' : 'even',
+    })),
+  )
+
+  const complete = await table.find({}).sort('seq', 'asc').page()
+  assert.equal(complete.documents.length, 5)
+  assert.equal(complete.hasMore, false)
+
+  const first = await table.find({}).sort('seq', 'asc').limit(2).page()
+  assert.deepEqual(first.documents.map((doc) => doc.seq), [1, 2])
+  assert.equal(first.hasMore, true)
+
+  const last = await table.find({}).sort('seq', 'asc').limit(2).offset(4).page()
+  assert.deepEqual(last.documents.map((doc) => doc.seq), [5])
+  assert.equal(last.hasMore, false)
+
+  const page1 = await table.findAfter('seq', undefined, { limit: 2 }).toArray()
+  assert.deepEqual(page1.map((doc) => doc.seq), [1, 2])
+  const page2 = await table.findAfter('seq', page1.at(-1)!.seq, { limit: 2 }).toArray()
+  assert.deepEqual(page2.map((doc) => doc.seq), [3, 4])
+  const page3 = await table.findAfter('seq', page2.at(-1)!.seq, { limit: 2 }).toArray()
+  assert.deepEqual(page3.map((doc) => doc.seq), [5])
+
+  const descending = await table
+    .findAfter('seq', 4, { limit: 2, sort: [['seq', 'desc']] })
+    .toArray()
+  assert.deepEqual(descending.map((doc) => doc.seq), [3, 2])
+
+  // Query.after() combines a cursor with an existing filter.
+  const filtered = await table
+    .find({ kind: 'odd' })
+    .sort('seq', 'asc')
+    .after('seq', 1)
+    .limit(10)
+    .toArray()
+  assert.deepEqual(filtered.map((doc) => doc.seq), [3, 5])
+
+  assert.throws(
+    () => table.find({}).sort('kind', 'asc').after('seq', 1),
+    /requires the sort to order by "seq"/,
+  )
+  assert.throws(
+    () => table.find({ seq: 1 }).after('seq', 1),
+    /conflicts with an existing filter/,
+  )
+})
+
+test('hitting the default limit is visible to a debug logger', async () => {
+  const messages: string[] = []
+  const client = makeClient({
+    maxRowsPerShard: 60,
+    logger: { debug: (...args: any[]) => messages.push(args.map(String).join(' ')) },
+  })
+  const table = client.useDatabase('default_limit').defineTable('rows', { seq: 'number' })
+  await table.insertMany(Array.from({ length: 101 }, (_, index) => ({ seq: index })))
+
+  const page = await table.find({}).page()
+  assert.equal(page.documents.length, 100)
+  assert.equal(page.hasMore, true)
+  assert.ok(messages.some((message) => message.includes('default limit of 100')))
 })

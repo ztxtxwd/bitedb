@@ -612,12 +612,27 @@ export class FakeFeishu {
     const pageToken = hasMore ? Buffer.from(String(nextOffset)).toString('base64url') : undefined
 
     const fieldNames: string[] | undefined = body.field_names
+    // Real Bitable search responses default to text_field_as_array=true; the
+    // record GET endpoint returns plain strings. Keep the difference here so
+    // tests cover both response shapes.
+    const textAsArray = query.text_field_as_array !== 'false'
+    const textFieldNames = table.fields
+      .filter((field) => field.type === 1)
+      .map((field) => field.field_name)
     let items = page.map((entry) => {
       const serialized = this.serializeRecord(base, table, entry.record)
       if (fieldNames) {
         const projected: Record<string, any> = {}
         for (const name of fieldNames) projected[name] = serialized.fields[name]
         serialized.fields = projected
+      }
+      if (textAsArray) {
+        for (const name of textFieldNames) {
+          const value = serialized.fields[name]
+          if (typeof value === 'string') {
+            serialized.fields[name] = [{ text: value, type: 'text' }]
+          }
+        }
       }
       return serialized
     })

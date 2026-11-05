@@ -31,6 +31,7 @@ export type {
   SortSpec,
   TableInfo,
   TableStats,
+  UpdateOptions,
   UpdateResult,
   UpdateSpec,
   WithId,

@@ -160,11 +160,14 @@ const db = createClient({
 })
 
 const database = db.useDatabase('production')  // 懒加载
-await database.ensure()                        // 可显式预热
+await database.ensure()                        // 只创建 / 发现 Base
 
 const table = database.defineTable('orders', schema)
 const same = database.table('orders')          // 同一句柄
 const alias = database.collection('orders')    // 别名
+
+// 已声明的表会在首次读写时逐个创建；需要提前预热时，并行创建它们
+await database.prewarm()
 
 await db.listDatabases()
 const catalogToken = await db.catalogBaseToken()
@@ -262,6 +265,20 @@ await orders.findOne({ sku: 'A-1' })
 await orders.get(orderId)
 await orders.countDocuments({ status: 'paid' })
 await orders.find({}).fields('sku', 'total').limit(10).toArray()
+
+// 分页：page() 额外返回 hasMore，用于判断结果是否被 limit 截断
+const { documents, hasMore } = await orders.find({ status: 'paid' }).limit(50).page()
+
+// 游标分页：按唯一字段（推荐 _id）翻页，开销不随页码增长
+const next = await orders.findAfter('_id', lastId, { limit: 50 }).toArray()
+
+// 已有筛选条件时直接用 Query.after() 追加游标
+await orders
+  .find({ status: 'paid' })
+  .sort('_id', 'asc')
+  .after('_id', lastId)
+  .limit(50)
+  .toArray()
 ```
 
 支持的筛选操作符：
@@ -281,7 +298,9 @@ await orders.find({}).fields('sku', 'total').limit(10).toArray()
 - 条件由 Bitable 服务端执行；`total` 这类公式列可以直接筛选和排序。
 - Bitable 的 filter 只支持一层布尔嵌套，并且每次查询最多一个 OR 分组。更复杂的查询请拆分，或拉取后在应用层过滤。
 - 日期按毫秒时间戳比较；数组条件表示“任意一个匹配”。
-- 默认 `limit` 为 100。跨分片排序会在客户端做最终归并；较大的 `offset + limit` 会分页拉取每个分片。
+- 默认 `limit` 为 100，超出部分会被丢弃，`toArray()` 不会报错。需要更多请显式 `limit()`；或用 `Query.page()` 拿到 `hasMore`；配置了 `logger.debug` 时，命中默认上限会输出一条提示。
+- `offset` 是“先拉取后切片”：每个分片最多拉取 `offset + limit` 行，深分页成本随 offset 线性增长。大数据量翻页请用 `findAfter()` / `Query.after()` 做游标分页；游标字段需要唯一（推荐 `_id`），重复值可能被跳过。
+- 跨分片排序会在客户端做最终归并。
 - 未指定排序时，顺序是“分片顺序 + 每个分片内的 API 顺序”，不是稳定业务顺序。
 - 字符串排序的最终归并使用 JS 比较；当分片内存在中文等复杂排序时，可能与飞书视图的排序规则略有差异。
 
@@ -299,11 +318,24 @@ await table.updateOne({ sku: 'A-1' }, { status: 'shipped' })
 await table.updateById(id, { $inc: { count: 2 } })
 await table.updateMany({ status: 'new' }, { $set: { status: 'queued' } })
 
+// 直接拿到更新后的文档，省去一次回读
+const result = await table.updateById(id, { $set: { status: 'shipped' } }, { returnDocument: 'after' })
+result.document // => 更新后的完整文档
+
+// updateMany 返回按匹配顺序排列的 documents
+await table.updateMany(
+  { status: 'new' },
+  { $set: { status: 'queued' } },
+  { returnDocument: 'after' },
+)
+
 await table.deleteOne(id)
 await table.deleteMany({ status: 'cancelled' })
 ```
 
 支持的更新操作符：`$set`、`$unset`、`$inc`、`$push`。也可以直接传字段补丁。
+
+`returnDocument: 'before' | 'after'` 让更新返回文档：`updateOne` / `updateById` 放在 `document`，`updateMany` 放在按匹配顺序排列的 `documents`。默认不返回（零额外开销）。`after` 文档由“更新前的行 + 补丁”在本地组装，不会多发一次读请求；公式列在飞书异步重算前可能仍是旧值。
 
 `$inc` / `$push` 是“读取当前值 → 计算 → 写回”，不是原子操作。并发写同一行可能丢失更新。
 
@@ -417,7 +449,7 @@ Bitable 单表有行数上限。bitedb 在物理层自动分片：
 限制：
 
 - 分片行数计数是尽力而为的。多进程/多实例同时写入时可能短暂超出单分片容量；需要时调用 `table.recount()` 从 Bitable 重新读取真实行数。
-- 没有全局单调分页游标；大偏移量查询会拉取更多数据。
+- 没有服务端全局分页游标；请用 `findAfter()` / `Query.after()` 基于唯一字段（推荐 `_id`）做游标分页。大偏移量查询会让每个分片拉取 `offset + limit` 行。
 - 关联字段与分片组合有上述分片 0 限制。
 
 ---
@@ -437,6 +469,7 @@ __bitedb_catalog__          <- 系统 Base
 - **目录发现**：客户端启动时先按名称找到目录 Base；找不到就创建。`databasePrefix` 是恢复时匹配数据库 Base 的依据，请保持稳定。
 - **固定目录**：多进程/Serverless 环境建议固定 `catalogBaseToken`，或设置环境变量 `BITEDB_CATALOG_BASE_TOKEN`，避免并发首次启动时创建多个目录。
 - **目录丢失恢复**：如果目录记录丢失，bitedb 会按 `bitedb:<name>` 收养已有数据库 Base，并按物理表名（含 `#N`）收养已有分片；同时从 Bitable 重新读取字段与真实行数。数据不会因为目录丢失而重建。
+- **冷启动**：表与字段默认在首次读写时按需创建。提前 `defineTable()` 后调用 `database.prewarm()` 会并行初始化所有已注册的表句柄；关联/公式字段仍按依赖顺序创建。字段级 DDL 不并行，以免同一张表上的并发建字段互相冲突。
 - **默认表**：飞书创建 Base 时会自带一张默认表，bitedb 不依赖、也不会自动删除它。
 
 ---
@@ -492,6 +525,7 @@ class Database {
   dropTable(name): Promise<void>
   refresh(): Promise<void>
   ensure(): Promise<DatabaseMeta>
+  prewarm(): Promise<void>
 }
 
 class Table<T> {
@@ -499,12 +533,13 @@ class Table<T> {
   insertMany(docs): Promise<WithId<T>[]>
   insert(doc): Promise<WithId<T>>
   find(filter?, options?): Query<T>
+  findAfter(field, lastValue, options?): Query<T>
   findOne(filter?, options?): Promise<WithId<T> | null>
   get(id): Promise<WithId<T> | null>
   countDocuments(filter?): Promise<number>
-  updateOne(idOrFilter, update): Promise<UpdateResult>
-  updateById(id, update): Promise<UpdateResult>
-  updateMany(filter, update): Promise<UpdateResult>
+  updateOne(idOrFilter, update, options?): Promise<UpdateResult>
+  updateById(id, update, options?): Promise<UpdateResult>
+  updateMany(filter, update, options?): Promise<UpdateResult>
   deleteOne(idOrFilter): Promise<DeleteResult>
   deleteMany(filter?): Promise<DeleteResult>
   defineSchema(schema): this
@@ -522,11 +557,15 @@ class Query<T> {
   offset(n): this
   skip(n): this
   fields(...names): this
+  after(field, value): this
   toArray(): Promise<WithId<T>[]>
+  page(): Promise<{ documents: WithId<T>[]; hasMore: boolean }>
   first(): Promise<WithId<T> | null>
   count(): Promise<number>
 }
 ```
+
+`UpdateOptions` 支持 `returnDocument: 'before' | 'after'`；`UpdateResult` 相应提供可选的 `document` / `documents`。
 
 错误类型：`BiteDBError`、`ConfigError`、`ValidationError`、`NotFoundError`、`UnsupportedError`、`FeishuApiError`。
 
@@ -548,7 +587,7 @@ bitedb 把 Bitable 当作存储引擎，但 Bitable 不是事务数据库。请�
 - **筛选/排序依赖 Bitable 的查询能力**。Bitable 自身维护查询所需的底层索引，bitedb 不额外创建二级索引；复杂布尔嵌套会抛 `UnsupportedError`，不会静默返回错误结果。
 - **高级权限**：开启多维表格高级权限后，调用身份必须拥有相应记录的可见/可管理权限，否则 API 可能返回空数据。
 - **速率**：Bitable 约 20 QPS，素材上传约 5 QPS / 10,000 次/天（以飞书当前文档为准）。bitedb 通过批处理、令牌桶和重试降低触发限流的概率，但不能突破平台限制。
-- **默认查询上限** 为 100 条；需要更多请显式 `limit()`。
+- **默认查询上限** 为 100 条；需要更多请显式 `limit()`，或用 `page()` 检查 `hasMore`。
 - **进程退出前调用 `await db.flush()` 或 `await db.close()`**。写入合并窗口和目录行数落盘都有定时器；Serverless 函数应在返回前等待写入 Promise，必要时显式 flush。
 - **高级权限 Base 的素材下载**：bitedb 会优先使用附件元数据里的 `url` / `tmp_url`（其中包含高级权限所需的 `extra`），失败再回退到按 `file_token` 下载。文本单元格里的自动转储标记没有 URL，在开启高级权限的 Base 上可能无法下载；这类 Base 建议用显式的 `blob` / `attachment` 字段。
 - **已转储的大值**在 Bitable 单元格里只是一个内部引用。基于该单元格内容的服务端筛选/排序，以及引用该字段的 Formula，看到的都是引用而不是原始内容；需要计算/筛选的字段请保持小值或关闭 `spill`。

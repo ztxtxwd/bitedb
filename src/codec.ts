@@ -9,6 +9,7 @@ import {
   safeJsonStringify,
 } from './blob.js'
 import { ValidationError } from './errors.js'
+import type { Logger } from './logger.js'
 import type { AttachmentMetadata, Document, HydrateMode } from './types.js'
 import type { StoredField, TableMeta } from './meta.js'
 import { isBinary, isPlainObject, setOwn } from './util.js'
@@ -25,9 +26,23 @@ export interface CodecContext {
   baseToken: string
   hydrate?: HydrateMode
   links?: LinkResolver
+  logger?: Logger
 }
 
 const MARKER_LIKE = /^\{"\$bitedb_(blob|json)":/
+
+/**
+ * Bitable returns text fields as plain strings from the record-get endpoint
+ * and, by default, as `[{ text, type }]` segments from the record-search
+ * endpoint (the `text_field_as_array` response shape).
+ */
+function decodeTextValue(raw: unknown): string | undefined {
+  if (typeof raw === 'string') return raw
+  if (Array.isArray(raw)) {
+    return raw.map((item) => (typeof item === 'string' ? item : item?.text ?? '')).join('')
+  }
+  return undefined
+}
 
 /**
  * Encode a document (or a patch) into Bitable record fields.
@@ -195,14 +210,21 @@ export async function decodeRecord(
 ): Promise<Document> {
   const fields = rawFields ?? {}
   const out: Document = {}
-  let logicalId: string | undefined
 
   for (const field of meta.fields) {
     const raw = fields[field.name]
     if (field.key === '_id') {
-      const decoded = typeof raw === 'string' && raw.length > 0 ? raw : recordId
-      logicalId = decoded
-      setOwn(out, '_id', decoded)
+      const decoded = decodeTextValue(raw)
+      if (decoded) {
+        setOwn(out, '_id', decoded)
+      } else {
+        if (decoded === undefined && raw !== undefined && raw !== null) {
+          ctx.logger?.warn?.(
+            `[bitedb] record ${recordId} has an unsupported _id value; falling back to the record id`,
+          )
+        }
+        setOwn(out, '_id', recordId)
+      }
       continue
     }
     if (raw === undefined) continue
@@ -230,17 +252,17 @@ export async function decodeFieldValue(
 
   switch (field.kind) {
     case 'text': {
-      if (Array.isArray(raw)) {
-        // text_field_as_array=true responses.
-        return raw.map((item) => (typeof item === 'string' ? item : item?.text ?? '')).join('')
-      }
-      return typeof raw === 'string' ? raw : raw
+      const text = decodeTextValue(raw)
+      return text === undefined ? raw : text
     }
 
     case 'json': {
-      if (typeof raw !== 'string') return raw
+      // JSON values are stored as text, so the search endpoint returns them in
+      // the same `[{ text, type }]` shape as any other text column.
+      const text = decodeTextValue(raw)
+      if (text === undefined) return raw
       try {
-        return JSON.parse(raw)
+        return JSON.parse(text)
       } catch {
         return raw
       }
@@ -324,13 +346,15 @@ function decodeComputed(field: StoredField, raw: unknown): unknown {
     case 'text':
       if (Array.isArray(raw)) return raw.map((item) => item?.text ?? item).join('')
       return typeof raw === 'string' ? raw : String(raw)
-    case 'json':
-      if (typeof raw !== 'string') return raw
+    case 'json': {
+      const text = decodeTextValue(raw)
+      if (text === undefined) return raw
       try {
-        return JSON.parse(raw)
+        return JSON.parse(text)
       } catch {
         return raw
       }
+    }
     default:
       if (isSpillMarkerString(raw)) return raw
       return raw
