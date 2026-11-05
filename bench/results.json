@@ -1,0 +1,206 @@
+{
+  "startedAt": "2026-11-05T05:41:58.588Z",
+  "database": "bitedb_perf",
+  "table": "bench",
+  "domain": "https://open.feishu.cn",
+  "options": {
+    "docs": 2000,
+    "sequential": 20,
+    "readOps": 60,
+    "concurrency": 16,
+    "batchSize": 500,
+    "batchWindowMs": 50,
+    "database": "bitedb_perf",
+    "table": "bench",
+    "fresh": false,
+    "keepData": false,
+    "json": "/root/code/bitedb/bench/results.json",
+    "mock": false,
+    "help": false
+  },
+  "bootstrap": {
+    "ms": 4030.3226329999998,
+    "calls": 9
+  },
+  "results": [
+    {
+      "group": "write",
+      "name": "insertOne burst (2000 concurrent)",
+      "ops": 2000,
+      "wallMs": 6381.831937,
+      "opsPerSecond": 313.38963791957343,
+      "p50": 4477.039070999999,
+      "p95": 6375.734287999999,
+      "p99": 6376.362423,
+      "apiCalls": 5
+    },
+    {
+      "group": "write",
+      "name": "insertOne sequential (20)",
+      "ops": 20,
+      "wallMs": 60815.12314,
+      "opsPerSecond": 0.3288655677627885,
+      "p50": 3000.5451609999946,
+      "p95": 3250.2314810000025,
+      "p99": 3506.344569000001,
+      "apiCalls": 40
+    },
+    {
+      "group": "read",
+      "name": "get(_id)",
+      "ops": 60,
+      "wallMs": 3554.5566459999973,
+      "opsPerSecond": 16.87974225070207,
+      "p50": 735.5888120000018,
+      "p95": 1280.1169279999885,
+      "p99": 1727.0983489999926,
+      "apiCalls": 70
+    },
+    {
+      "group": "read",
+      "name": "findOne({ sku })",
+      "ops": 60,
+      "wallMs": 10799.712949000008,
+      "opsPerSecond": 5.555703219459704,
+      "p50": 2768.2247859999916,
+      "p95": 3117.9271850000077,
+      "p99": 3154.6246729999984,
+      "apiCalls": 60
+    },
+    {
+      "group": "read",
+      "name": "find limit 100",
+      "ops": 60,
+      "wallMs": 11533.856455000001,
+      "opsPerSecond": 5.202076186234277,
+      "p50": 3003.734368999998,
+      "p95": 3178.235089000009,
+      "p99": 3281.0092650000006,
+      "apiCalls": 60
+    },
+    {
+      "group": "read",
+      "name": "find sort seq desc limit 100",
+      "ops": 60,
+      "wallMs": 11818.591482000003,
+      "opsPerSecond": 5.07674709726463,
+      "p50": 3060.0954499999934,
+      "p95": 3222.075549999994,
+      "p99": 3276.7576800000097,
+      "apiCalls": 60
+    },
+    {
+      "group": "read",
+      "name": "find price>=50 sort limit 100",
+      "ops": 60,
+      "wallMs": 11512.065436000004,
+      "opsPerSecond": 5.211923119579459,
+      "p50": 2979.993709999995,
+      "p95": 3276.1170649999985,
+      "p99": 3360.8416690000013,
+      "apiCalls": 60
+    },
+    {
+      "group": "read",
+      "name": "find offset 200 limit 100",
+      "ops": 60,
+      "wallMs": 13669.936812,
+      "opsPerSecond": 4.389193660890201,
+      "p50": 3485.4572170000174,
+      "p95": 3712.1765319999977,
+      "p99": 3796.349908999997,
+      "apiCalls": 60
+    },
+    {
+      "group": "read",
+      "name": "find limit 1000 (paged)",
+      "ops": 30,
+      "wallMs": 15450.647616000002,
+      "opsPerSecond": 1.941666184201453,
+      "p50": 7720.179926000012,
+      "p95": 8087.489021999994,
+      "p99": 8111.830229999992,
+      "apiCalls": 60
+    },
+    {
+      "group": "read",
+      "name": "countDocuments({ run })",
+      "ops": 60,
+      "wallMs": 10642.592252000002,
+      "opsPerSecond": 5.637724210351528,
+      "p50": 2637.9847010000085,
+      "p95": 3070.7971689999977,
+      "p99": 3173.1853550000233,
+      "apiCalls": 60
+    },
+    {
+      "group": "update",
+      "name": "updateOne $set by _id",
+      "ops": 60,
+      "wallMs": 31826.590643000003,
+      "opsPerSecond": 1.885216065805544,
+      "p50": 2994.916008,
+      "p95": 3512.7266769999987,
+      "p99": 5078.914089999977,
+      "apiCalls": 120
+    },
+    {
+      "group": "update",
+      "name": "updateMany active=true",
+      "ops": 1010,
+      "wallMs": 10289.590506000008,
+      "opsPerSecond": 98.15745334190457,
+      "p50": 10289.596145000018,
+      "p95": 10289.596145000018,
+      "p99": 10289.596145000018,
+      "apiCalls": 6
+    },
+    {
+      "group": "delete",
+      "name": "deleteMany({ run })",
+      "ops": 2020,
+      "wallMs": 20531.07920800001,
+      "opsPerSecond": 98.38742423305735,
+      "p50": 20531.084654000006,
+      "p95": 20531.084654000006,
+      "p99": 20531.084654000006,
+      "apiCalls": 10
+    }
+  ],
+  "apiCalls": {
+    "auth.token": 1,
+    "drive.files": 1,
+    "tables": 2,
+    "fields": 3,
+    "records.search": 431,
+    "records.batch_create": 24,
+    "records.item": 213,
+    "records.batch_update": 3,
+    "records.batch_delete": 5
+  },
+  "tableStats": {
+    "name": "bench",
+    "shards": [
+      {
+        "index": 0,
+        "tableId": "tbl6ZmaJPd5FO7FB",
+        "rows": 2022,
+        "capacity": 20000
+      }
+    ],
+    "totalRows": 2022,
+    "fields": [
+      "_id",
+      "run",
+      "seq",
+      "sku",
+      "price",
+      "count",
+      "active",
+      "created_at",
+      "status",
+      "payload",
+      "note"
+    ]
+  }
+}

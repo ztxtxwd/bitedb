@@ -1,0 +1,84 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Validate packaging without publishing to npm'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # Trusted publishing requires npm >= 11.5.1.
+      - name: Install latest npm
+        run: npm install -g npm@11
+
+      - run: npm ci
+
+      - name: Verify release tag matches package.json
+        if: github.event_name == 'release'
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="${{ github.event.release.tag_name }}"
+          tag="${tag#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Release tag '${{ github.event.release.tag_name }}' does not match package.json version '$version'."
+            exit 1
+          fi
+
+      - name: Ensure manual publish runs from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Manual publishes must be dispatched from the main branch (got '${{ github.ref }}')."
+          exit 1
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Check whether the version is already on npm
+        id: exists
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "bitedb@$version" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::bitedb@$version is already published; skipping."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish (dry run)
+        if: steps.exists.outputs.published == 'false' && inputs.dry-run
+        run: npm publish --dry-run --access public
+
+      - name: Publish
+        if: steps.exists.outputs.published == 'false' && !inputs.dry-run
+        run: npm publish --provenance --access public

@@ -1,0 +1,10 @@
+{
+    "mcpServers": {
+        "feishu-doc": {
+            "command": "npx",
+            "args": [
+                "feishu-doc-mcp@latest"
+            ]
+        }
+    }
+}
