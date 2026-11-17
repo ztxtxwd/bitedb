@@ -69,11 +69,28 @@ npm install bitedb
 ## 飞书应用配置
 
 1. 在[飞书开放平台](https://open.feishu.cn/app)创建企业自建应用。
-2. 开通权限（任选粗细粒度）：
-   - `bitable:app`：多维表格完整读写；或使用更细的 `base:app:create`、`base:table:*`、`base:record:*`、`base:field:*` 等。
-   - `drive:drive`：列出云空间文件、创建 Base、上传/下载素材。
-3. 发布应用版本，并由企业管理员审批。
+2. 开通权限。**最小可用集只有两个**：
+
+   | 权限 | 用途 |
+   | --- | --- |
+   | `bitable:app` | 多维表格读写；同时覆盖附件（素材）上传/下载 |
+   | `space:document:retrieve` | 列出云空间文件夹中的文件清单（仅名称、类型、token 等元数据） |
+
+   bitedb 启动时会用文件清单接口按名称查找并接管已有的目录 Base（`__bitedb_catalog__`）和数据 Base（`bitedb:<库名>`）。`GET /drive/v1/files` 接受的最小权限是 `space:document:retrieve`，**不需要 `drive:drive` 或 `drive:drive:readonly`**——后者还包含下载/评论能力，范围更大。创建 Base 由 `bitable:app`（或 `base:app:create`）覆盖，同样不需要 Drive 写权限。
+
+   如需更细粒度的多维表格权限，把 `bitable:app` 替换为：
+
+   - `base:app:create`
+   - `base:table:read`、`base:table:create`、`base:table:delete`
+   - `base:field:read`、`base:field:create`、`base:field:update`
+   - `base:record:retrieve`（搜索记录）、`base:record:read`（单条读取）、`base:record:create`、`base:record:update`、`base:record:delete`
+
+   使用 Blob 字段时还需补 `docs:document.media:upload` 和 `docs:document.media:download`（使用 `bitable:app` 时已覆盖，无需额外申请）。
+
+3. 发布应用版本，并由企业管理员审批。免审权限开通后立即生效；需要审核的权限在发布并审批通过后生效。
 4. 把 `appId` / `appSecret` 放在服务端环境变量里。**永远不要把 secret 放进浏览器代码。**
+
+> 已开通 `application:application:patch`（修改应用信息）时，应用可以调用 `PATCH /open-apis/application/v7/applications/:app_id/config` 自助增删上述权限（`scope.add_scopes` / `scope.remove_scopes`）；需要审核的权限再调用 `POST /open-apis/application/v7/applications/:app_id/publish` 提交发布。首次开通 `application:application:patch` 仍需在开发者后台人工完成。
 
 如果使用 `folderToken`，请确保应用有该文件夹的编辑权限。使用 tenant access token 时，应用只能操作自己创建的文件夹；最简单的做法是省略 `folderToken`，让 bitedb 在云空间根目录创建自己的文件。
 
